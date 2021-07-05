@@ -1,5 +1,6 @@
 ﻿using KSP.IO;
 using KSP.UI.Screens;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -15,14 +16,24 @@ namespace ForScience
         private ApplicationLauncherButton FSAppButton;
         private PluginConfiguration config;
         private long delay;
-        // available experiments
+        bool autoScience;
         private List<ModuleScienceExperiment> experiments;
-        //states
+        private List<string> checkedExperiments = new List<string>();
+        private ModuleScienceContainer activeContainer;
         CelestialBody stateBody;
         string stateBiome;
         ExperimentSituations stateSituation = 0;
         // timer
         System.Diagnostics.Stopwatch stopwatch = new System.Diagnostics.Stopwatch();
+
+        public ForScience()
+        {
+            config = PluginConfiguration.CreateForType<ForScience>();
+            config.load();
+            delay = config.GetValue<long>("delay");
+            autoScience = config.GetValue<bool>("autoScience");
+            Log("Config geladen. Delay ist '"+ delay.ToString() + "'");
+        }
 
         private void Start()
         {
@@ -32,11 +43,8 @@ namespace ForScience
                 Destroy(this);
                 return;
             }
-            config = PluginConfiguration.CreateForType<ForScience>();
-            config.load();
-            delay = config.GetValue<long>("delay");
             GameEvents.onGUIApplicationLauncherReady.Add(SetupAppButton);
-            GameEvents.onLevelWasLoaded.Add(OnLevelWasLoaded);
+            GameEvents.onFlightReady.Add(OnFlightReady);
             GameEvents.onVesselChange.Add(OnVesselChange);
             GameEvents.onVesselWasModified.Add(OnVesselChange);
             GameEvents.onGamePause.Add(OnGamePause);
@@ -44,15 +52,10 @@ namespace ForScience
             Log("Loaded");
         }
 
-        void OnFlightReady()
-        {
-            stopwatch.Restart();
-        }
-
         void OnDestroy()
         {
             GameEvents.onGUIApplicationLauncherReady.Remove(SetupAppButton);
-            GameEvents.onLevelWasLoaded.Remove(OnLevelWasLoaded);
+            GameEvents.onFlightReady.Remove(OnFlightReady);
             GameEvents.onVesselChange.Remove(OnVesselChange);
             GameEvents.onVesselWasModified.Remove(OnVesselChange);
             GameEvents.onGamePause.Remove(OnGamePause);
@@ -74,13 +77,16 @@ namespace ForScience
                        onEnable: null,
                        onDisable: null,
                        visibleInScenes: ApplicationLauncher.AppScenes.FLIGHT,
-                       texture: GetIconTexture(config.GetValue<bool>("autoTransfer"))
+                       texture: GetIconTexture(autoScience)
                    );
             }
         }
 
         private void FixedUpdate() // running in update
         {
+            // plugin autoScience?
+            if (!autoScience)
+                return;
             // stopwatch active?
             if (!stopwatch.IsRunning)
                 return;
@@ -99,11 +105,6 @@ namespace ForScience
             stopwatch.Restart();
         }
 
-        public void OnLevelWasLoaded(GameScenes scene)
-        {
-            OnVesselChange(FlightGlobals.ActiveVessel);
-        }
-
         public void OnGamePause()
         {
             stopwatch.Stop();
@@ -115,6 +116,12 @@ namespace ForScience
             stopwatch.Start();
         }
 
+        void OnFlightReady()
+        {
+            Log("OnFlightReady");
+            OnVesselChange(FlightGlobals.ActiveVessel);
+        }
+
         private void OnVesselChange(Vessel data)
         {
             Log("OnVesselChange");
@@ -124,8 +131,9 @@ namespace ForScience
                 return;
             }
             experiments = GetExperimentList();
-            stopwatch.Reset();
-            stopwatch.Start();
+            checkedExperiments.Clear();
+            activeContainer = ActiveContainer();
+            stopwatch.Restart();
         }
 
         private bool IsReady()
@@ -145,14 +153,33 @@ namespace ForScience
 
         void TransferScience() // automaticlly find, transer and consolidate science data on the vessel
         {
-            if (ActiveContainer().GetActiveVesselDataCount() != ActiveContainer().GetScienceCount()) // only actually transfer if there is data to move
+            if (activeContainer.GetActiveVesselDataCount() != activeContainer.GetScienceCount()) // only actually transfer if there is data to move
             {
                 Log("Transfering science to container.");
-                ActiveContainer().StoreData(GetExperimentList().Cast<IScienceDataContainer>().ToList(), true); // this is what actually moves the data to the active container
+                activeContainer.StoreData(experiments.Cast<IScienceDataContainer>().ToList(), true); // this is what actually moves the data to the active container
                 var containerstotransfer = GetContainerList(); // a temporary list of our containers
-                containerstotransfer.Remove(ActiveContainer()); // we need to remove the container we storing the data in because that would be wierd and buggy
-                ActiveContainer().StoreData(containerstotransfer.Cast<IScienceDataContainer>().ToList(), true); // now we store all data from other containers
+                containerstotransfer.Remove(activeContainer); // we need to remove the container we storing the data in because that would be wierd and buggy
+                activeContainer.StoreData(containerstotransfer.Cast<IScienceDataContainer>().ToList(), true); // now we store all data from other containers
             }
+        }
+
+        bool StatesHaveChanged() // Track our vessel state, it is used for thread control to know when to fire off new experiments since there is no event for this
+        {
+        CelestialBody body = CurrentBody();
+        string biome = CurrentBiome();
+        ExperimentSituations situation = CurrentSituation();
+            if (biome != string.Empty)
+            {
+                if (situation != stateSituation | body != stateBody | biome != stateBiome)
+                {
+                    stateBody = body;
+                    stateSituation = situation;
+                    stateBiome = biome;
+                    Log("New States: Body = '" + stateBody.bodyName + "', Situation = '" + stateSituation.ToString() + "', Biome = '" + stateBiome + "'");
+                    return true;
+                }
+            }
+            return false;
         }
 
         void RunScience() // this is primary business logic for finding and running valid experiments
@@ -161,19 +188,27 @@ namespace ForScience
             {
                 foreach (ModuleScienceExperiment currentExperiment in experiments) // loop through all the experiments onboard
                 {
-                    Log("Checking experiment: '" + currentExperiment.experiment.experimentTitle + "'");
-                    if (ActiveContainer().HasData(NewScienceData(currentExperiment))) // skip data we already have onboard
+                    Log("Checking experiment: '" + currentExperiment.experiment.id + "'");
+                    string key = stateBody.bodyName + stateBiome + stateSituation.ToString() + currentExperiment.experiment.id;
+                    if (checkedExperiments.Contains(key))
+                        continue;
+                    else
+                    {
+                        checkedExperiments.Add(key);
+                        Log("Added key '" + key + "'");
+                    }
+                    if (activeContainer.HasData(NewScienceData(currentExperiment))) // skip data we already have onboard
                         continue;
                     if (currentExperiment.experiment.id == "surfaceSample" && !SurfaceSamplesUnlocked()) // check to see is surface samples are unlocked
                         continue;
                     if (!currentExperiment.rerunnable && !IsScientistOnBoard) // no cheating goo and materials here
                         continue;
-                    if (!currentExperiment.experiment.IsAvailableWhile(CurrentSituation(), CurrentBody())) // this experiement isn't available here so we skip it
+                    if (!currentExperiment.experiment.IsAvailableWhile(stateSituation, stateBody)) // this experiement isn't available here so we skip it
                         continue;
                     if (CurrentScienceValue(currentExperiment) < 0.1) // this experiment has no more value so we skip it
                         continue;
                     Log("Running experiment: '" + CurrentScienceSubject(currentExperiment.experiment).id + "'");
-                    ActiveContainer().AddData(NewScienceData(currentExperiment)); //manually add data to avoid deployexperiment state issues
+                    activeContainer.AddData(NewScienceData(currentExperiment)); //manually add data to avoid deployexperiment state issues
                 }
             }
         }
@@ -203,6 +238,13 @@ namespace ForScience
             );
         }
 
+        ScienceSubject CurrentScienceSubject(ScienceExperiment experiment)
+        {
+            string fixBiome = string.Empty; // some biomes don't have 4th string, so we just put an empty in to compare strings later
+            if (experiment.BiomeIsRelevantWhile(stateSituation)) fixBiome = stateBiome;// for those that do, we add it to the string
+            return ResearchAndDevelopment.GetExperimentSubject(experiment, stateSituation, stateBody, fixBiome, null);//ikr!, we pretty much did all the work already, jeez
+        }
+
         CelestialBody CurrentBody()
         {
             return FlightGlobals.ActiveVessel.mainBody;
@@ -225,13 +267,6 @@ namespace ForScience
             return string.Empty;
         }
 
-        ScienceSubject CurrentScienceSubject(ScienceExperiment experiment)
-        {
-            string fixBiome = string.Empty; // some biomes don't have 4th string, so we just put an empty in to compare strings later
-            if (experiment.BiomeIsRelevantWhile(CurrentSituation())) fixBiome = CurrentBiome();// for those that do, we add it to the string
-            return ResearchAndDevelopment.GetExperimentSubject(experiment, CurrentSituation(), CurrentBody(), fixBiome, null);//ikr!, we pretty much did all the work already, jeez
-        }
-
         ModuleScienceContainer ActiveContainer() // set the container to gather all science data inside, usualy this is the root command pod of the oldest vessel
         {
             return FlightGlobals.ActiveVessel.FindPartModulesImplementing<ModuleScienceContainer>().FirstOrDefault();
@@ -247,28 +282,13 @@ namespace ForScience
             return FlightGlobals.ActiveVessel.FindPartModulesImplementing<ModuleScienceContainer>(); // list of all experiments onboard
         }
 
-        bool StatesHaveChanged() // Track our vessel state, it is used for thread control to know when to fire off new experiments since there is no event for this
-        {
-            if (CurrentBiome() != string.Empty)
-            {
-                if (CurrentSituation() != stateSituation | CurrentBody() != stateBody | CurrentBiome() != stateBiome)
-                {
-                    stateBody = CurrentBody();
-                    stateSituation = CurrentSituation();
-                    stateBiome = CurrentBiome();
-                    Log("New States: Body = '" + stateBody + "', Situation = '" + stateSituation + "', Biome = '" + stateBiome + "'");
-                    return true;
-                }
-            }
-            return false;
-        }
-
         void ToggleCollection() // This is our main toggle for the logic and changes the icon between green and red versions on the bar when it does so.
         {
-            bool autoTransfer = config.GetValue<bool>("autoTransfer");
-            autoTransfer = !autoTransfer;
-            FSAppButton.SetTexture(GetIconTexture(autoTransfer));
-            config.SetValue("autoTransfer", autoTransfer);
+            autoScience = !autoScience;
+            FSAppButton.SetTexture(GetIconTexture(autoScience));
+            config.SetValue("autoScience", autoScience);
+            config.save();
+            OnVesselChange(FlightGlobals.ActiveVessel);
         }
 
         // check if there is a scientist onboard so we can rerun things like goo or scijrs

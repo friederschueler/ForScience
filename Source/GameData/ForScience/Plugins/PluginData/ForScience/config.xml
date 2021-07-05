@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <config>
-	<bool name="autoTransfer">true</bool>
-    <long name="delay">1000</long>
+	<bool name="autoScience">true</bool>
+    <long name="delay">250</long>
 </config>
