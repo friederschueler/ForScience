@@ -32,7 +32,7 @@ namespace ForScience
             config.load();
             delay = config.GetValue<long>("delay");
             autoScience = config.GetValue<bool>("autoScience");
-            Log("Config geladen. Delay ist '"+ delay.ToString() + "'");
+            Log("Config loaded");
         }
 
         private void Start()
@@ -49,7 +49,7 @@ namespace ForScience
             GameEvents.onVesselWasModified.Add(OnVesselChange);
             GameEvents.onGamePause.Add(OnGamePause);
             GameEvents.onGameUnpause.Add(OnGameUnpause);
-            Log("Loaded");
+            Log("GameEvents registered");
         }
 
         void OnDestroy()
@@ -124,7 +124,6 @@ namespace ForScience
 
         private void OnVesselChange(Vessel data)
         {
-            Log("OnVesselChange");
             if (FlightGlobals.ActiveVessel == null)
             {
                 Log("ActiveVessel is null! this shouldn't happen!");
@@ -188,20 +187,21 @@ namespace ForScience
             {
                 foreach (ModuleScienceExperiment currentExperiment in experiments) // loop through all the experiments onboard
                 {
-                    Log("Checking experiment: '" + currentExperiment.experiment.id + "'");
                     string key = stateBody.bodyName + stateBiome + stateSituation.ToString() + currentExperiment.experiment.id;
                     if (checkedExperiments.Contains(key))
                         continue;
                     else
                     {
                         checkedExperiments.Add(key);
-                        Log("Added key '" + key + "'");
+                        Log("Adding new key '" + key + "'");
                     }
                     if (activeContainer.HasData(NewScienceData(currentExperiment))) // skip data we already have onboard
                         continue;
                     if (currentExperiment.experiment.id == "surfaceSample" && !SurfaceSamplesUnlocked()) // check to see is surface samples are unlocked
                         continue;
                     if (!currentExperiment.rerunnable && !IsScientistOnBoard) // no cheating goo and materials here
+                        continue;
+                    if (currentExperiment.requiresInventoryPart && !IsPartAvailable(currentExperiment.requiredInventoryPart)) // no cheating for eva science experiment
                         continue;
                     if (!currentExperiment.experiment.IsAvailableWhile(stateSituation, stateBody)) // this experiement isn't available here so we skip it
                         continue;
@@ -274,7 +274,7 @@ namespace ForScience
 
         List<ModuleScienceExperiment> GetExperimentList() // a list of all experiments
         {
-            return FlightGlobals.ActiveVessel.FindPartModulesImplementing<ModuleScienceExperiment>();
+            return FlightGlobals.ActiveVessel.FindPartModulesImplementing<ModuleScienceExperiment>().Where(e => !string.IsNullOrEmpty(e.experiment.id)).ToList();
         }
 
         List<ModuleScienceContainer> GetContainerList() // a list of all science containers
@@ -293,6 +293,16 @@ namespace ForScience
 
         // check if there is a scientist onboard so we can rerun things like goo or scijrs
         bool IsScientistOnBoard => FlightGlobals.ActiveVessel.GetVesselCrew().Any(k => k.trait == KerbalRoster.scientistTrait);
+
+        // check if kerbals has eva experiment in inventory
+        bool IsPartAvailable(string part)
+        {
+            KerbalEVA eva = FlightGlobals.ActiveVessel.GetComponent<KerbalEVA>();
+            if (eva != null)
+                return eva.ModuleInventoryPartReference.ContainsPart(part);
+            else
+                return false;
+        }
 
         Texture2D GetIconTexture(bool b) // just returns the correct icon for the given state
         {
